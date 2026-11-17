@@ -32,6 +32,10 @@ BASE_DIR = Path(__file__).resolve().parent
 
 def create_app(db_path: str | None = None) -> FastAPI:
     db_path = db_path or os.environ.get("DEMO_DB_PATH", "./data/demo.db")
+    catalog_page_size = int(
+        os.environ.get("DEMO_CATALOG_PAGE_SIZE", "10").strip() or "10"
+    )
+    catalog_page_size = max(1, min(catalog_page_size, 100))
     store = DemoStore(db_path)
     ensure_seed(store)
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -46,10 +50,28 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
+        try:
+            page = max(1, int(request.query_params.get("page", "1")))
+        except ValueError:
+            page = 1
+        notices, total, total_pages, generation = store.catalog_page(
+            page, catalog_page_size
+        )
+        if page > total_pages and total:
+            page = total_pages
+            notices, total, total_pages, generation = store.catalog_page(
+                page, catalog_page_size
+            )
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"notices": store.list()},
+            {
+                "notices": notices,
+                "page": page,
+                "total": total,
+                "total_pages": total_pages,
+                "generation": generation,
+            },
         )
 
     @app.get("/notice/{number}", response_class=HTMLResponse)
@@ -208,6 +230,33 @@ def create_app(db_path: str | None = None) -> FastAPI:
         )
 
     # ------------------------------------------------------------ JSON API
+
+    @app.get("/api/catalog")
+    def api_catalog(page: int = 1, page_size: int = 20):
+        """Paginated notice catalogue tagged with a monotonic generation.
+
+        Any create/edit/attachment/retraction bumps the generation inside the
+        same transaction as the data change, so a client that fetches several
+        pages can verify they all describe one catalogue generation.
+        """
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise HTTPException(
+                status_code=400,
+                detail="page 与 page_size 必须为正整数，且 page_size ≤ 100",
+            )
+        notices, total, total_pages, generation = store.catalog_page(
+            page, page_size
+        )
+        return JSONResponse(
+            {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+                "generation": generation,
+                "items": [n.catalog_dict() for n in notices],
+            }
+        )
 
     @app.get("/api/notices/{number}")
     def api_notice(number: str):

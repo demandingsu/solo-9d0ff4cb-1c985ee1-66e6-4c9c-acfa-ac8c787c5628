@@ -18,6 +18,7 @@ from .domain import (
     format_bytes,
     format_timestamp,
 )
+from .reconcile import DEFAULT_PAGE_SIZE, ReconcileService
 from .source import HttpSourceClient
 from .store import ArchiveStore
 
@@ -43,6 +44,14 @@ def create_app(
         client=source_client,
     )
     service = CaptureService(store, source)
+    try:
+        page_size = int(
+            _env("RECONCILE_PAGE_SIZE", str(DEFAULT_PAGE_SIZE))
+        )
+    except ValueError:
+        page_size = DEFAULT_PAGE_SIZE
+    page_size = max(1, min(page_size, 100))
+    reconcile_service = ReconcileService(store, source, page_size=page_size)
     templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
     templates.env.filters["bytes"] = format_bytes
     templates.env.filters["ts"] = format_timestamp
@@ -61,6 +70,7 @@ def create_app(
     app.state.store = store
     app.state.source = source
     app.state.service = service
+    app.state.reconciler = reconcile_service
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
@@ -147,6 +157,26 @@ def create_app(
                 "X-Content-SHA256": record.attachment_sha256,
                 "Cache-Control": "private, max-age=0, must-revalidate",
             },
+        )
+
+    @app.get("/reconcile", response_class=HTMLResponse)
+    def reconcile_page(request: Request):
+        return templates.TemplateResponse(
+            request,
+            "reconcile.html",
+            {
+                "report": None,
+                "page_size": reconcile_service.page_size,
+            },
+        )
+
+    @app.post("/reconcile")
+    def reconcile_run(request: Request):
+        report = reconcile_service.reconcile()
+        return templates.TemplateResponse(
+            request,
+            "reconcile.html",
+            {"report": report, "page_size": reconcile_service.page_size},
         )
 
     @app.get("/healthz")

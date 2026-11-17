@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from .domain import (
     ArchiveStorageError,
@@ -66,6 +68,55 @@ CREATE TABLE IF NOT EXISTS capture_log (
 """
 
 
+@dataclass(frozen=True)
+class AnnouncementState:
+    """Archive-side state of one announcement as of one committed snapshot."""
+
+    number: str
+    latest_revision: int
+    source_retracted: bool
+
+
+class CatalogSnapshot:
+    """A read-only, point-in-time view of the whole archive.
+
+    All reads run inside one deferred transaction. In WAL mode the first read
+    pins the database snapshot, so a capture committing in another window while
+    a reconciliation is paginating the source cannot make individual
+    comparisons observe different archive states: the whole result corresponds
+    to one committed archive state. Only a shared read lock is taken, so it
+    never blocks concurrent captures.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def announcement_states(self) -> dict[str, AnnouncementState]:
+        rows = self._conn.execute(
+            """
+            SELECT a.number, a.source_retracted,
+                   (
+                       SELECT v.revision FROM versions v
+                       WHERE v.announcement_number = a.number
+                       ORDER BY v.revision DESC LIMIT 1
+                   ) AS latest_revision
+            FROM announcements a
+            """
+        ).fetchall()
+        states: dict[str, AnnouncementState] = {}
+        for row in rows:
+            states[row["number"]] = AnnouncementState(
+                number=row["number"],
+                latest_revision=(
+                    int(row["latest_revision"])
+                    if row["latest_revision"] is not None
+                    else 0
+                ),
+                source_retracted=bool(row["source_retracted"]),
+            )
+        return states
+
+
 class ArchiveStore:
     def __init__(self, db_path: str | os.PathLike[str]):
         self.db_path = Path(db_path)
@@ -105,6 +156,33 @@ class ArchiveStore:
             conn.close()
 
     # ---------------------------------------------------------------- reads
+
+    @contextmanager
+    def snapshot(self) -> Iterator[CatalogSnapshot]:
+        """Open one read transaction that pins a committed archive state."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            view = CatalogSnapshot(conn)
+            # Touch the database inside the transaction so the WAL snapshot is
+            # pinned before any comparison work starts.
+            conn.execute("SELECT COUNT(*) FROM announcements").fetchone()
+            yield view
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise ArchiveStorageError(f"无法读取档案快照：{exc}") from exc
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
 
     def get_version(
         self, number: str, revision: int

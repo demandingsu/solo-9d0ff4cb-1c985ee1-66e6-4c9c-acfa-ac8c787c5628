@@ -238,3 +238,74 @@ class CaptureResult:
     revision: int
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+
+
+# ----------------------------------------------------- gap reconciliation
+
+class CatalogChanged(SourceInconsistent):
+    """The source catalogue moved to another generation mid-pagination."""
+
+
+@dataclass(frozen=True)
+class CatalogItem:
+    """One entry of the source's paginated notice catalogue."""
+
+    number: str
+    title: str
+    revision: int
+    retracted: bool
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class CatalogPage:
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+    generation: int
+    items: list[CatalogItem] = field(default_factory=list)
+
+
+ReconcileKind = Literal["missing", "behind", "retraction_mismatch"]
+
+
+@dataclass(frozen=True)
+class ReconcileEntry:
+    """One discrepancy between the source catalogue and one archive snapshot."""
+
+    kind: ReconcileKind
+    number: str
+    title: str
+    source_revision: int
+    source_retracted: bool
+    archived_revision: int | None
+    archived_retracted: bool | None
+
+    @property
+    def kind_label(self) -> str:
+        return _RECONCILE_KIND_LABELS[self.kind]
+
+
+_RECONCILE_KIND_LABELS: dict[str, str] = {
+    "missing": "未入档",
+    "behind": "修订落后",
+    "retraction_mismatch": "撤稿状态不一致",
+}
+
+
+@dataclass(frozen=True)
+class ReconcileReport:
+    """A complete reconciliation, guaranteed to describe one catalogue
+    generation compared against one committed archive snapshot."""
+
+    completed: bool
+    catalog_generation: int
+    catalog_total: int
+    pages_fetched: int
+    page_size: int
+    entries: list[ReconcileEntry] = field(default_factory=list)
+    reason: str | None = None
+    archived_total: int = 0
+    started_at: str = ""
+    finished_at: str = ""

@@ -12,6 +12,14 @@
   </form>
 </div>
 
+<div class="card">
+  <form method="post" action="/reconcile" class="inline-form">
+    <button type="submit">发起漏采核对</button>
+    <span class="meta">逐页比对源站目录与档案最高修订、撤稿状态；翻页期间源站变动则本次核对作废，不展示部分清单。</span>
+    <a href="/reconcile" class="meta">核对说明 →</a>
+  </form>
+</div>
+
 <h2>已归档公告</h2>
 {% if announcements %}
 <div class="card" style="padding:4px 10px">

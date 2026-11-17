@@ -15,7 +15,10 @@ from urllib.parse import quote, urljoin, urlsplit
 import httpx
 
 from .domain import (
+    NUMBER_RE,
     AttachmentSnapshot,
+    CatalogItem,
+    CatalogPage,
     RevisionMismatch,
     SourceInconsistent,
     SourceNotFound,
@@ -116,6 +119,109 @@ class HttpSourceClient:
             source_url=f"{self.base_url}/api/notices/{quote(number, safe='')}",
             attachment=attachment,
             source_updated_at=meta.get("updated_at"),
+        )
+
+    def fetch_catalog_page(self, page: int, page_size: int) -> CatalogPage:
+        """Read one catalogue page with strict contract validation.
+
+        Cross-page generation/total consistency is enforced by the
+        reconciliation service, not here: this method only guarantees that a
+        single returned page is internally well-formed.
+        """
+        if page < 1 or page_size < 1 or page_size > 100:
+            raise _invalid("目录分页参数不合法")
+        url = f"{self.base_url}/api/catalog?page={page}&page_size={page_size}"
+        try:
+            response = self._client.get(
+                url, headers={"Accept": "application/json"}
+            )
+        except httpx.RequestError as exc:
+            raise SourceUnavailable(
+                f"目录第 {page} 页读取失败：{type(exc).__name__}；本次核对未改动档案。"
+            ) from exc
+        if response.status_code != 200:
+            raise SourceUnavailable(
+                f"目录第 {page} 页返回 HTTP {response.status_code}；"
+                "本次核对未改动档案。"
+            )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise _invalid("目录响应不是有效 JSON") from exc
+        return self._parse_catalog_page(data, page, page_size)
+
+    def _parse_catalog_page(
+        self, data: Any, requested_page: int, requested_page_size: int
+    ) -> CatalogPage:
+        if not isinstance(data, dict):
+            raise _invalid("目录响应顶层必须是对象")
+
+        page = _positive_int(data, "page")
+        page_size = _positive_int(data, "page_size")
+        if page != requested_page or page_size != requested_page_size:
+            raise _invalid("目录分页字段与请求不一致")
+
+        total = data.get("total")
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise _invalid("字段 total 必须是非负整数")
+        total_pages = data.get("total_pages")
+        if (
+            isinstance(total_pages, bool)
+            or not isinstance(total_pages, int)
+            or total_pages < 0
+        ):
+            raise _invalid("字段 total_pages 必须是非负整数")
+        expected_pages = (total + page_size - 1) // page_size
+        if total_pages != expected_pages:
+            raise _invalid("目录 total_pages 与 total/page_size 不一致")
+        if page > total_pages and total > 0:
+            raise _invalid("目录页码超出总页数")
+
+        generation = _positive_int(data, "generation")
+
+        raw_items = data.get("items")
+        if not isinstance(raw_items, list):
+            raise _invalid("字段 items 必须是数组")
+        if len(raw_items) > page_size:
+            raise _invalid("目录单页条目数超过 page_size")
+
+        items: list[CatalogItem] = []
+        seen: set[str] = set()
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                raise _invalid("目录条目必须是对象")
+            number = _text(raw, "number", max_chars=100).strip()
+            if not number or not NUMBER_RE.fullmatch(number):
+                raise _invalid("目录条目公告号不合法")
+            if number in seen:
+                raise _invalid(f"目录第 {page} 页出现重复公告号 {number}")
+            seen.add(number)
+            title = _text(raw, "title", max_chars=MAX_TITLE_CHARS)
+            revision = _positive_int(raw, "revision")
+            retracted = raw.get("retracted", False)
+            if not isinstance(retracted, bool):
+                raise _invalid("目录条目 retracted 必须是布尔值")
+            updated_at = raw.get("updated_at")
+            if updated_at is not None and (
+                not isinstance(updated_at, str) or len(updated_at) > 100
+            ):
+                raise _invalid("目录条目 updated_at 不合法")
+            items.append(
+                CatalogItem(
+                    number=number,
+                    title=title,
+                    revision=revision,
+                    retracted=retracted,
+                    updated_at=updated_at,
+                )
+            )
+        return CatalogPage(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=total_pages,
+            generation=generation,
+            items=items,
         )
 
     # ----------------------------------------------------------------- HTTP

@@ -100,3 +100,64 @@ def test_healthz(tmp_path, demo):
     app = _archive_app(tmp_path, demo)
     with TestClient(app) as client:
         assert client.get("/healthz").json() == {"status": "ok"}
+
+
+def test_reconcile_page_get_and_complete_report(tmp_path, demo):
+    app = _archive_app(tmp_path, demo)
+    with TestClient(app) as client:
+        page = client.get("/reconcile")
+        assert page.status_code == 200
+        assert "漏采核对" in page.text
+
+        # Nothing archived yet: both seed notices are missing.
+        result = client.post("/reconcile")
+        assert result.status_code == 200
+        assert "核对完成" in result.text
+        assert "未入档" in result.text
+        assert "ZFCG-2026-0001" in result.text
+        assert "ZFCG-2026-0002" in result.text
+        # Each row offers the existing capture entry for follow-up work.
+        assert 'action="/capture"' in result.text
+
+
+def test_reconcile_incomplete_page_shows_no_partial_list(tmp_path, demo):
+    app = _archive_app(tmp_path, demo)
+    with TestClient(app) as client:
+        client.post("/capture", data={"number": NUMBER})
+
+        # Force a small page size and mutate the catalogue between pages by
+        # wrapping the reconciler's source client at the service boundary.
+        reconciler = app.state.reconciler
+        reconciler.page_size = 1
+        real_fetch = reconciler.source.fetch_catalog_page
+
+        def fetch_with_mid_pagination_change(page, page_size):
+            result = real_fetch(page, page_size)
+            if page == 1:
+                demo.post(
+                    f"/notice/{NUMBER}/retract",
+                    data={"action": "retract"},
+                    follow_redirects=False,
+                )
+            return result
+
+        reconciler.source.fetch_catalog_page = fetch_with_mid_pagination_change
+        page = client.post("/reconcile")
+        assert page.status_code == 200
+        assert "核对未完成" in page.text
+        assert "不展示部分清单" in page.text
+        # No discrepancy table rows rendered on an incomplete run.
+        assert "待补采" not in page.text
+        assert "未入档" not in page.text
+
+
+def test_reconcile_clean_report_and_nav_link(tmp_path, demo):
+    app = _archive_app(tmp_path, demo)
+    with TestClient(app) as client:
+        client.post("/capture", data={"number": NUMBER})
+        client.post("/capture", data={"number": "ZFCG-2026-0002"})
+        home = client.get("/")
+        assert 'href="/reconcile"' in home.text
+        page = client.post("/reconcile")
+        assert "暂无待补采项" in page.text
+        assert "g" in page.text

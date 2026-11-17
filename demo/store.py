@@ -35,7 +35,17 @@ CREATE TABLE IF NOT EXISTS attachments (
     blob            BLOB NOT NULL,
     revision        INTEGER NOT NULL
 );
+
+-- Bumped inside the same transaction as every catalogue-affecting write,
+-- so readers can prove every page they fetched belongs to one catalogue
+-- generation (no notice added, edited or withdrawn mid-pagination).
+CREATE TABLE IF NOT EXISTS catalog_meta (
+    key    TEXT PRIMARY KEY,
+    value  INTEGER NOT NULL
+);
 """
+
+GENERATION_KEY = "generation"
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,16 @@ class DemoNotice:
             },
         }
 
+    def catalog_dict(self) -> dict:
+        """One catalogue entry: enough for the archive's gap reconciliation."""
+        return {
+            "number": self.number,
+            "title": self.title,
+            "revision": self.revision,
+            "retracted": self.retracted,
+            "updated_at": self.updated_at,
+        }
+
 
 class DemoStore:
     def __init__(self, db_path: str | Path):
@@ -102,8 +122,88 @@ class DemoStore:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA synchronous = FULL")
             conn.executescript(SCHEMA)
+            conn.execute(
+                "INSERT OR IGNORE INTO catalog_meta (key, value) VALUES (?, 1)",
+                (GENERATION_KEY,),
+            )
+            conn.commit()
         finally:
             conn.close()
+
+    # --------------------------------------------------- catalogue generation
+
+    def catalog_generation(self) -> int:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT value FROM catalog_meta WHERE key = ?",
+                (GENERATION_KEY,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row["value"]) if row else 1
+
+    @staticmethod
+    def _bump_generation(conn: sqlite3.Connection) -> int:
+        cur = conn.execute(
+            "UPDATE catalog_meta SET value = value + 1 WHERE key = ?",
+            (GENERATION_KEY,),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT INTO catalog_meta (key, value) VALUES (?, 2)",
+                (GENERATION_KEY,),
+            )
+        row = conn.execute(
+            "SELECT value FROM catalog_meta WHERE key = ?",
+            (GENERATION_KEY,),
+        ).fetchone()
+        return int(row["value"])
+
+    def catalog_page(
+        self, page: int, page_size: int
+    ) -> tuple[list[DemoNotice], int, int, int]:
+        """Return (notices, total, total_pages, generation) for one page.
+
+        The count and the notices are read in one explicit read transaction so
+        both numbers describe the same generation snapshot at read time.
+        """
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            total = conn.execute(
+                "SELECT COUNT(*) AS n FROM notices"
+            ).fetchone()["n"]
+            generation = conn.execute(
+                "SELECT value FROM catalog_meta WHERE key = ?",
+                (GENERATION_KEY,),
+            ).fetchone()["value"]
+            offset = (page - 1) * page_size
+            rows = conn.execute(
+                """
+                SELECT n.*, a.filename AS a_filename,
+                       a.content_type AS a_content_type, a.size AS a_size,
+                       a.sha256 AS a_sha256, a.blob AS a_blob,
+                       a.revision AS a_revision
+                FROM notices n
+                LEFT JOIN attachments a ON a.notice_number = n.number
+                ORDER BY n.number
+                LIMIT ? OFFSET ?
+                """,
+                (page_size, offset),
+            ).fetchall()
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+        total_pages = (total + page_size - 1) // page_size
+        notices = [self._row(r) for r in rows]
+        return notices, total, total_pages, int(generation)
 
     # ---------------------------------------------------------------- reads
 
@@ -207,6 +307,7 @@ class DemoStore:
                 conn, number, attachment_filename, attachment_content_type,
                 attachment_blob, revision=1,
             )
+            self._bump_generation(conn)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -274,6 +375,7 @@ class DemoStore:
                     "UPDATE attachments SET revision = ? WHERE notice_number = ?",
                     (new_rev, number),
                 )
+            self._bump_generation(conn)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -311,6 +413,7 @@ class DemoStore:
                 conn, number, attachment_filename, attachment_content_type,
                 attachment_blob, revision=new_rev,
             )
+            self._bump_generation(conn)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -336,6 +439,7 @@ class DemoStore:
             )
             if cursor.rowcount != 1:
                 raise KeyError(number)
+            self._bump_generation(conn)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -352,11 +456,17 @@ class DemoStore:
         """Deliberate inconsistency for demonstrating capture rejection."""
         conn = self._connect()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "UPDATE notices SET body_revision = ?, attachment_revision = ? "
                 "WHERE number = ?",
                 (body_revision, attachment_revision, number),
             )
+            self._bump_generation(conn)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
 
@@ -364,6 +474,7 @@ class DemoStore:
         """Rewind the published revision to demonstrate a source conflict."""
         conn = self._connect()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 UPDATE notices SET revision = ?, body_revision = ?,
@@ -372,6 +483,11 @@ class DemoStore:
                 """,
                 (revision, revision, revision, utc_now_iso(), number),
             )
+            self._bump_generation(conn)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
 

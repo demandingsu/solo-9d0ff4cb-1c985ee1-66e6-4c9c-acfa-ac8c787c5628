@@ -1,10 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>采购公告</h1>
-<p class="meta">当前站上公告 {{ notices|length }} 条。初始数据由启动脚本写入，也可在下方新增。</p>
+<p class="meta">
+  当前站上公告 {{ total }} 条，共 {{ total_pages }} 页；目录代次
+  <strong>{{ generation }}</strong>（任何新增、改稿、换附件或撤稿都会使代次 +1）。
+</p>
 
 <div class="card">
-  <h2 style="margin-top:0">公告列表</h2>
+  <h2 style="margin-top:0">公告列表（第 {{ page }} / {{ total_pages }} 页）</h2>
   <ul class="notice-list" style="list-style:none;padding:0;margin:0">
   {% for n in notices %}
     <li>
@@ -17,6 +20,13 @@
     <li class="meta">尚无公告。</li>
   {% endfor %}
   </ul>
+  {% if total_pages > 1 %}
+  <p class="pager meta" style="margin-top:14px">
+    {% if page > 1 %}<a href="/?page={{ page - 1 }}">上一页</a>{% else %}上一页{% endif %}
+    · 第 {{ page }} / {{ total_pages }} 页 ·
+    {% if page < total_pages %}<a href="/?page={{ page + 1 }}">下一页</a>{% else %}下一页{% endif %}
+  </p>
+  {% endif %}
 </div>
 
 <div class="card">

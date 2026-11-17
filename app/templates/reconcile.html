@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}漏采核对 · 市政采购公告档案{% endblock %}
+{% block content %}
+<h1>漏采核对</h1>
+<p class="meta">
+  逐页读取示范站公告目录，与档案中各公告的最高修订和撤稿状态对照。
+  核对结果必须来自同一目录代次与同一份已提交档案状态；翻页期间源站变动时仅提示未完成，不展示部分清单。核对只读，不会改动存档。
+</p>
+
+<div class="card">
+  <form method="post" action="/reconcile" class="inline-form">
+    <button type="submit">发起漏采核对</button>
+    <span class="meta">目录每页 {{ page_size }} 条，逐页读取并校验目录代次。</span>
+  </form>
+</div>
+
+{% if report %}
+  {% if not report.completed %}
+  <div class="banner err">
+    <strong>核对未完成，未生成清单。</strong><br>
+    原因：{{ report.reason }}<br>
+    档案状态保持原样，未写入或修改任何内容。请在源站稳定后重新发起核对。
+  </div>
+  {% else %}
+  <div class="banner">
+    核对完成：源站目录代次 <strong>g{{ report.catalog_generation }}</strong>
+    （共 {{ report.catalog_total }} 条，读取 {{ report.pages_fetched }} 页），
+    对照档案快照中的 {{ report.archived_total }} 条公告；
+    发现 <strong>{{ report.entries|length }}</strong> 条待补采/不一致。
+    <span class="meta">核对时段 {{ report.started_at|ts }} → {{ report.finished_at|ts }}</span>
+  </div>
+
+  {% if report.entries %}
+  <div class="card" style="padding:4px 10px">
+  <table>
+    <thead>
+      <tr>
+        <th>类型</th><th>公告号</th><th>标题</th>
+        <th>源站状态</th><th>档案状态</th><th>补采</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for e in report.entries %}
+      <tr>
+        <td>
+          {% if e.kind == "missing" %}<span class="pill retracted">{{ e.kind_label }}</span>
+          {% elif e.kind == "behind" %}<span class="pill conflict">{{ e.kind_label }}</span>
+          {% else %}<span class="pill conflict">{{ e.kind_label }}</span>{% endif %}
+        </td>
+        <td><code>{{ e.number }}</code></td>
+        <td>{{ e.title }}</td>
+        <td>
+          r{{ e.source_revision }}
+          {% if e.source_retracted %}<span class="pill retracted">源站已撤稿</span>
+          {% else %}<span class="pill">在发</span>{% endif %}
+        </td>
+        <td>
+          {% if e.archived_revision is none %}
+            <span class="empty">未入档</span>
+          {% else %}
+            r{{ e.archived_revision }}
+            {% if e.archived_retracted %}<span class="pill retracted">档案标记撤稿</span>
+            {% else %}<span class="pill">档案标记在发</span>{% endif %}
+          {% endif %}
+        </td>
+        <td>
+          <form method="post" action="/capture" style="margin:0">
+            <input type="hidden" name="number" value="{{ e.number }}">
+            <button type="submit" class="small-btn">按现有入口补采</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="meta">
+    “补采”沿用既有采集入口：未入档的公告将新建版本；修订落后的按源站修订留新版、旧版不动；
+    撤稿状态不一致的仅更新公告级撤稿标记，不新建版本。
+  </p>
+  {% else %}
+  <div class="card"><p class="empty" style="margin:0">
+    目录代次 g{{ report.catalog_generation }} 下所有公告均已入档、修订不落后且撤稿状态一致，暂无待补采项。
+  </p></div>
+  {% endif %}
+  {% endif %}
+{% endif %}
+{% endblock %}
